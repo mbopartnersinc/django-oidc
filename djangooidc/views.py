@@ -8,10 +8,10 @@ from django.conf import settings
 from django.contrib.auth import logout as auth_logout, authenticate, login
 from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth.views import login as auth_login_view, logout as auth_logout_view
+from django.http import HttpResponse, HttpResponseRedirect
 from django.shortcuts import redirect, render_to_response, resolve_url
-from django.http import HttpResponse
 from django.template import RequestContext
-from oic.oic.message import IdToken
+from oic.oic.message import IdToken, EndSessionRequest
 
 from djangooidc.oidc import OIDCClients, OIDCError
 
@@ -137,9 +137,18 @@ def logout(request, next_page=None):
         request_args = None
         if 'id_token' in request.session.keys():
             request_args = {'id_token': IdToken(**request.session['id_token'])}
+
+        # Adding logic to redirect user to the OIC registered logout url instead of attempting to sign out on behalf of
+        # the user. Some IDPs require that.
+        if client.registration_response["redirect_on_logout"]:
+            url, body, ht_args, csi = client.request_info(request=EndSessionRequest, method="GET",
+                                                          request_args=request_args, extra_args=extra_args, scope="",
+                                                          state=request.session["state"])
+            return HttpResponseRedirect(url)
+
         res = client.do_end_session_request(state=request.session["state"],
                                             extra_args=extra_args, request_args=request_args)
-        resp = HttpResponse(content_type=res.headers["content-type"], status=res.status_code, content=res._content)
+        resp = HttpResponse(content_type=res.headers.get("content-type", None), status=res.status_code, content=res._content)
         for key, val in res.headers.items():
             resp[key] = val
         return resp
