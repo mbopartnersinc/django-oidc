@@ -1,15 +1,15 @@
 # coding: utf-8
 
 import logging
-from urlparse import parse_qs
+from urllib.parse import parse_qs
 
+from django import forms
 from django.conf import settings
 from django.contrib.auth import logout as auth_logout, authenticate, login
 from django.contrib.auth.forms import AuthenticationForm
 from django.contrib.auth.views import login as auth_login_view, logout as auth_logout_view
 from django.shortcuts import redirect, render_to_response, resolve_url
 from django.http import HttpResponse
-from django import forms
 from django.template import RequestContext
 from oic.oic.message import IdToken
 
@@ -56,7 +56,7 @@ def openid(request, op_name=None):
             try:
                 client = CLIENTS.dynamic_client(form.cleaned_data["hint"])
                 request.session["op"] = client.provider_info["issuer"]
-            except Exception, e:
+            except Exception as e:
                 logger.exception("could not create OOID client")
                 return render_to_response("djangooidc/error.html", {"error": e})
     else:
@@ -66,7 +66,7 @@ def openid(request, op_name=None):
     if client:
         try:
             return client.create_authn_request(request.session)
-        except Exception, e:
+        except Exception as e:
             return render_to_response("djangooidc/error.html", {"error": e})
 
     # Otherwise just render the list+form.
