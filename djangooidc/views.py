@@ -1,17 +1,19 @@
 # coding: utf-8
 
 import logging
-from urlparse import parse_qs
+from urllib.parse import parse_qs
 
+from django import forms
 from django.conf import settings
 from django.contrib.auth import logout as auth_logout, authenticate, login
 from django.contrib.auth.forms import AuthenticationForm
-from django.contrib.auth.views import login as auth_login_view, logout as auth_logout_view
+from django.contrib.auth.views import redirect_to_login
+from django.http import HttpResponse, HttpResponseRedirect, HttpResponseForbidden, JsonResponse, HttpResponseBadRequest
 from django.shortcuts import redirect, render_to_response, resolve_url
-from django.http import HttpResponse
-from django import forms
 from django.template import RequestContext
-from oic.oic.message import IdToken
+from django.urls import reverse
+from oic.exception import PyoidcError
+from oic.oic.message import IdToken, EndSessionRequest
 
 from djangooidc.oidc import OIDCClients, OIDCError
 
@@ -40,8 +42,7 @@ def openid(request, op_name=None):
 
     # Internal login?
     if request.method == 'POST' and "internal_login" in request.POST:
-        ilform = AuthenticationForm(request.POST)
-        return auth_login_view(request)
+        return redirect_to_login(request.get_full_path())
     else:
         ilform = AuthenticationForm()
 
@@ -56,7 +57,7 @@ def openid(request, op_name=None):
             try:
                 client = CLIENTS.dynamic_client(form.cleaned_data["hint"])
                 request.session["op"] = client.provider_info["issuer"]
-            except Exception, e:
+            except Exception as e:
                 logger.exception("could not create OOID client")
                 return render_to_response("djangooidc/error.html", {"error": e})
     else:
@@ -66,7 +67,7 @@ def openid(request, op_name=None):
     if client:
         try:
             return client.create_authn_request(request.session)
-        except Exception, e:
+        except Exception as e:
             return render_to_response("djangooidc/error.html", {"error": e})
 
     # Otherwise just render the list+form.
@@ -78,28 +79,56 @@ def openid(request, op_name=None):
 
 # Step 4: analyze the token returned by the OP
 def authz_cb(request):
-    client = CLIENTS[request.session["op"]]
-    query = None
+    client_idx = request.COOKIES.get('OP')
+    if client_idx:
+        client = CLIENTS[client_idx]
+    else:
+        # return the first (default) client
+        client = CLIENTS[list(settings.OIDC_PROVIDERS)[0]]
 
     try:
         query = parse_qs(request.META['QUERY_STRING'])
         userinfo = client.callback(query, request.session)
+        # removing nonce, state cookies. they're essentially worthless at this point, but let's remove them for
+        # security purposes nevertheless.
+        [request.COOKIES.pop(k, None) for k in ['STATE', 'NONCE']]
         request.session["userinfo"] = userinfo
-        user = authenticate(**userinfo)
-        if user:
-            login(request, user)
-            return redirect(request.session["next"])
-        else:
+        user = authenticate(request, **userinfo)
+        if not user:
             raise Exception('this login is not valid in this application')
+        login(request, user)
+        return redirect(request.COOKIES.get('NEXT'))
     except OIDCError as e:
         return render_to_response("djangooidc/error.html", {"error": e, "callback": query})
+    except:
+        # Any exception during authorization, present them with an error page
+        return redirect(reverse("generic_error"))
+
+
+def refresh(request):
+    # Get default client
+    client_idx = request.session.get('op')
+    if client_idx:
+        client = CLIENTS[client_idx]
+    else:
+        client = CLIENTS[list(settings.OIDC_PROVIDERS)[0]]
+    try:
+        refresh_token = request.GET.get('refresh_token') or request.COOKIES.get('REFRESH_TOKEN') \
+                        or request.session.get('refresh_token')
+        if refresh_token is None:
+            return HttpResponseBadRequest("No refresh token found.")
+        tokens = client.refresh_access_token(request.session, refresh_token)
+        response = JsonResponse(tokens)
+        response.set_cookie("ACCESS_TOKEN", tokens['access_token'])
+        response.set_cookie("REFRESH_TOKEN", tokens['refresh_token'])
+    except OIDCError as error:
+        return HttpResponseForbidden(error)
+    return response
 
 
 def logout(request, next_page=None):
-    if not "op" in request.session.keys():
-        return auth_logout_view(request, next_page)
-
-    client = CLIENTS[request.session["op"]]
+    client_idx = request.COOKIES.get('OP', request.session.get('op', list(settings.OIDC_PROVIDERS)[0]))
+    client = CLIENTS[client_idx]
 
     # User is by default NOT redirected to the app - it stays on an OP page after logout.
     # Here we determine if a redirection to the app was asked for and is possible.
@@ -126,8 +155,7 @@ def logout(request, next_page=None):
                     extra_args["post_logout_redirect_uri"] = urls[0]
                 else:
                     # Just take the first registered URL as a desperate attempt to come back to the application
-                    extra_args["post_logout_redirect_uri"] = client.registration_response["post_logout_redirect_uris"][
-                        0]
+                    extra_args["post_logout_redirect_uri"] = client.registration_response["post_logout_redirect_uris"][0]
     else:
         # No post_logout_redirect_uris registered at the OP - no redirection to the application is possible anyway
         pass
@@ -137,12 +165,25 @@ def logout(request, next_page=None):
         request_args = None
         if 'id_token' in request.session.keys():
             request_args = {'id_token': IdToken(**request.session['id_token'])}
-        res = client.do_end_session_request(state=request.session["state"],
-                                            extra_args=extra_args, request_args=request_args)
-        resp = HttpResponse(content_type=res.headers["content-type"], status=res.status_code, content=res._content)
+
+        # Adding logic to redirect user to the OIC registered logout url instead of attempting to sign out on behalf of
+        # the user. Some IDPs require that
+        state = request.COOKIES.get("STATE", request.session.get("state", None))
+        if client.registration_response.get("redirect_on_logout"):
+            url, body, ht_args, csi = client.request_info(request=EndSessionRequest, method="GET",
+                                                          request_args=request_args, extra_args=extra_args, scope="",
+                                                          state=state)
+            return HttpResponseRedirect(url)
+
+        res = client.do_end_session_request(state=state, extra_args=extra_args, request_args=request_args)
+        resp = HttpResponse(content_type=res.headers.get("content-type", None), status=res.status_code,
+                            content=res._content)
         for key, val in res.headers.items():
             resp[key] = val
         return resp
+    except PyoidcError:
+        # Probably couldn't get session variables or something. It's okay, just make forward them back to log out page.
+        return HttpResponseRedirect(reverse("openid_with_op_name", kwargs={'op_name': client_idx}))
     finally:
         # Always remove Django session stuff - even if not logged out from OP. Don't wait for the callback as it may never come.
         auth_logout(request)

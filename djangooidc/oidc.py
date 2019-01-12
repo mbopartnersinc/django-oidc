@@ -2,8 +2,8 @@
 
 from django.conf import settings
 from oic.exception import MissingAttribute
-from oic import oic
-from oic.oauth2 import rndstr, ErrorResponse
+from oic import oic, rndstr
+from oic.oauth2 import ErrorResponse
 from oic.oic import ProviderConfigurationResponse, AuthorizationResponse
 from oic.oic import RegistrationResponse
 from oic.oic import AuthorizationRequest
@@ -27,8 +27,8 @@ class Client(oic.Client):
     def __init__(self, client_id=None, ca_certs=None,
                  client_prefs=None, client_authn_method=None, keyjar=None,
                  verify_ssl=True, behaviour=None):
-        oic.Client.__init__(self, client_id, ca_certs, client_prefs,
-                            client_authn_method, keyjar, verify_ssl)
+        oic.Client.__init__(self, client_id,  client_prefs, client_authn_method,
+                            keyjar, verify_ssl, None, ca_certs,)
         if behaviour:
             self.behaviour = behaviour
 
@@ -59,10 +59,17 @@ class Client(oic.Client):
         logger.debug("ht_args: %s" % ht_args)
 
         resp = HttpResponseRedirect(url)
+
+        resp.set_cookie("NONCE", session['nonce'])
+        resp.set_cookie('STATE', session['state'])
+        resp.set_cookie('OP', session['op'])
+        resp.set_cookie('NEXT', session['next'])
+
         if ht_args:
             for key, value in ht_args.items():
                 resp[key] = value
         logger.debug("resp_headers: %s" % ht_args)
+
         return resp
 
     def callback(self, response, session):
@@ -82,11 +89,11 @@ class Client(oic.Client):
             else:
                 return OIDCError("Access denied")
 
-        if session["state"] != authresp["state"]:
+        if response.get('state')[0] != authresp["state"]:
             return OIDCError("Received state not the same as expected.")
 
         try:
-            if authresp["id_token"] != session["nonce"]:
+            if authresp["id_token"] != response.get('state')[0]:
                 return OIDCError("Received nonce not the same as expected.")
             self.id_token[authresp["state"]] = authresp["id_token"]
         except KeyError:
@@ -129,11 +136,35 @@ class Client(oic.Client):
 
         return userinfo
 
+    # def do_access_token_refresh(self, request=RefreshAccessTokenRequest,
+    #                             state="", body_type="json", method="POST",
+    #                             request_args=None, extra_args=None,
+    #                             http_args=None,
+    #                             response_cls=AccessTokenResponse,
+    #                             **kwargs):
+
+    def refresh_access_token(self, session, refresh_token=""):
+        if not refresh_token:
+            refresh_token = session.get('refresh_token', "")
+        state = session.get('state')
+        args = {
+            "refresh_token": refresh_token,
+            "client_id": self.client_id,
+            "client_secret": self.client_secret
+        }
+        # do_access_token_refresh wants to get the token from state, if it can find it. Having problems with that
+        # and the token doesn't actually matter as the request will be made with the request token. Therefore, setting
+        # token to something meaningful but useless.
+        refresp = self.do_access_token_refresh(state=state, request_args=args, token=refresh_token)
+        if isinstance(refresp, ErrorResponse):
+            raise OIDCError("Invalid response %s." % refresp["error"])
+        session['access_token'] = refresp['access_token']
+        session['refresh_token'] = refresp['refresh_token']
+        return {token_key: refresp[token_key] for token_key in ['access_token', 'refresh_token']}
 
 class OIDCClients(object):
     def __init__(self, config):
         """
-
         :param config: Imported configuration module
         :return:
         """
