@@ -1,6 +1,3 @@
-# coding: utf-8
-
-from __future__ import unicode_literals
 import datetime
 from django.conf import settings
 from django.contrib.auth import get_user_model
@@ -16,15 +13,13 @@ class OpenIdConnectBackend(ModelBackend):
     In all other cases, None is returned.
     """
 
-    def authenticate(self, **kwargs):
+    def authenticate(self, request, **kwargs):
         user = None
         if not kwargs or 'sub' not in kwargs.keys():
             return user
 
         UserModel = get_user_model()
-        username = self.clean_username(kwargs['sub'])
-        if 'upn' in kwargs.keys():
-            username = kwargs['upn']
+        username = self.clean_username(kwargs['employee_number'])
 
         # Some OP may actually choose to withhold some information, so we must test if it is present
         openid_data = {'last_login': datetime.datetime.now()}
