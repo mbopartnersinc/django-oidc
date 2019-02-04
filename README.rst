@@ -11,10 +11,10 @@ Quickstart
 Install djangooidc::
 
     # Latest released package:
-    pip install django-oidc
+    pip install django-oidc    # currently won't work with MBO
     
     # Latest code - unstable!
-    pip install git+https://github.com/marcanpilami/django-oidc.git
+    pip install git+https://github.com/mbopartnersinc/django-oidc.git
     
 
 Then to use it in a Django project, add this to your urls.py::
